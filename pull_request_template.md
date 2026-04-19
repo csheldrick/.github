@@ -23,3 +23,13 @@ Please include a summary of the changes made in this pull request. Describe the 
 ## Linked Issues
 
 Close #(issue number)
+
+<!-- Please include a summary of the change and which issue is fixed. Include relevant motivation and context. -->
+
+## Review
+- [ ] Code review completed
+- [ ] CI tests passed
+
+## Copilot Review
+- [ ] Copilot reviewed the code
+
