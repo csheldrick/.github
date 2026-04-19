@@ -23,11 +23,6 @@ on:
         description: "GitHub Models identifier"
         required: false
         default: "claude-opus-4-6"
-      apply_changes:
-        description: "Apply generated patch to repository"
-        required: true
-        type: boolean
-        default: true
       commit_changes:
         description: "Commit and push applied changes"
         required: true
@@ -91,7 +86,6 @@ jobs:
           COMMENT_BODY: ${{ github.event.comment.body || '' }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           INPUT_PLAN_FILE: ${{ inputs.plan_file || '' }}
-          INPUT_APPLY_CHANGES: ${{ inputs.apply_changes || 'true' }}
           INPUT_COMMIT_CHANGES: ${{ inputs.commit_changes || 'true' }}
           INPUT_CREATE_PR: ${{ inputs.create_pr || 'true' }}
           INPUT_SUPERPOWERS_REPO: ${{ inputs.superpowers_repo || '' }}
@@ -104,7 +98,6 @@ jobs:
           if [ "$EVENT_NAME" = "issue_comment" ]; then
             BODY="$COMMENT_BODY"
             PLAN_FILE="${BODY#'/implement-plan '}"
-            APPLY_CHANGES="false"
             COMMIT_CHANGES="false"
             CREATE_PR="false"
             SUPERPOWERS_REPO="${REPOSITORY_OWNER}/superpowers"
@@ -113,7 +106,6 @@ jobs:
             MODEL="openai/gpt-4.1"
           else
             PLAN_FILE="$INPUT_PLAN_FILE"
-            APPLY_CHANGES="$INPUT_APPLY_CHANGES"
             COMMIT_CHANGES="$INPUT_COMMIT_CHANGES"
             CREATE_PR="$INPUT_CREATE_PR"
             SUPERPOWERS_REPO="$INPUT_SUPERPOWERS_REPO"
@@ -175,7 +167,6 @@ jobs:
 
           echo "plan_file=$PLAN_FILE" >> "$GITHUB_OUTPUT"
           echo "plan_path=$PLAN_PATH" >> "$GITHUB_OUTPUT"
-          echo "apply_changes=$APPLY_CHANGES" >> "$GITHUB_OUTPUT"
           echo "commit_changes=$COMMIT_CHANGES" >> "$GITHUB_OUTPUT"
           echo "create_pr=$CREATE_PR" >> "$GITHUB_OUTPUT"
           echo "superpowers_repo=$SUPERPOWERS_REPO" >> "$GITHUB_OUTPUT"
@@ -210,7 +201,7 @@ jobs:
 
           {
             echo "You are implementing a plan in this repository."
-            echo "Use AGENT INSTRUCTIONS and PLAN to generate a valid unified diff patch only."
+            echo "Use AGENT INSTRUCTIONS and PLAN to make the required code changes directly."
             echo ""
             echo "REPOSITORY CONTEXT:"
             echo "- Project: AutoKeep Copilot VS Code extension"
@@ -226,11 +217,6 @@ jobs:
             echo ""
             echo "SELECTED PLAN:"
             cat "${{ steps.resolve.outputs.plan_path }}"
-            echo ""
-            echo "OUTPUT FORMAT (STRICT):"
-            echo "- Return only a unified diff patch."
-            echo "- Start with 'diff --git'."
-            echo "- Do not wrap output in code fences."
           } > implementation-output/implementation-prompt.txt
 
           echo "agent_file=$AGENT_FILE" >> "$GITHUB_OUTPUT"
@@ -243,7 +229,7 @@ jobs:
       - name: Install Copilot CLI
         run: npm install -g @github/copilot@1
 
-      - name: Generate implementation patch via Copilot CLI
+      - name: Invoke Copilot agent to implement plan
         id: generate
         shell: bash
         env:
@@ -254,60 +240,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          PATCH_FILE="implementation-output/generated.patch"
-          FULL_PROMPT_FILE="implementation-output/full-implementation-prompt.txt"
-
-          cat implementation-output/implementation-prompt.txt > "$FULL_PROMPT_FILE"
-          echo "" >> "$FULL_PROMPT_FILE"
-          echo "Write only a unified diff patch to the file: $PATCH_FILE" >> "$FULL_PROMPT_FILE"
-          echo "The patch must start with 'diff --git'. Do not wrap output in code fences." >> "$FULL_PROMPT_FILE"
-
-          if ! copilot -p "/fleet $(cat "$FULL_PROMPT_FILE")" \
+          if ! copilot -p "/fleet $(cat "implementation-output/implementation-prompt.txt")" \
             --agent="plan-coordinator" \
             --allow-all \
             --remote \
             --no-ask-user; then
-            echo "Copilot CLI failed to generate implementation patch"
+            echo "Copilot CLI failed to implement the plan"
             exit 1
           fi
 
-          if [ ! -s "$PATCH_FILE" ]; then
-            echo "Generated patch is empty; Copilot CLI did not write the expected file"
-            exit 1
-          fi
-
-          echo "patch_ready=true" >> "$GITHUB_OUTPUT"
-
-          echo "patch_file=$PATCH_FILE" >> "$GITHUB_OUTPUT"
-
-      - name: Apply generated patch
-        id: apply
-        if: ${{ steps.resolve.outputs.apply_changes == 'true' && steps.generate.outputs.patch_ready == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          git apply --index "${{ steps.generate.outputs.patch_file }}"
-          echo "applied=true" >> "$GITHUB_OUTPUT"
+          echo "agent_ran=true" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
-        if: ${{ steps.resolve.outputs.apply_changes == 'true' && steps.generate.outputs.patch_ready == 'true' }}
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
 
       - name: Install dependencies
-        if: ${{ steps.resolve.outputs.apply_changes == 'true' && steps.generate.outputs.patch_ready == 'true' }}
         run: npm install
 
       - name: Validate compilation
-        if: ${{ steps.resolve.outputs.apply_changes == 'true' && steps.generate.outputs.patch_ready == 'true' }}
         run: npm run compile
         continue-on-error: true
 
       - name: Commit applied implementation
-        if: ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.apply_changes == 'true' && (steps.resolve.outputs.commit_changes == 'true' || steps.resolve.outputs.create_pr == 'true') && steps.generate.outputs.patch_ready == 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && (steps.resolve.outputs.commit_changes == 'true' || steps.resolve.outputs.create_pr == 'true') && steps.generate.outputs.agent_ran == 'true' }}
         id: commit
         shell: bash
         run: |
@@ -315,6 +273,17 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Remove workflow-only artifacts that must never be committed
+          rm -rf superpowers
+          rm -rf implementation-output
+
+          # Restore .github/agents/ to its committed state in case the agent
+          # copied files there from the superpowers repo during execution
+          git checkout HEAD -- .github/agents/ 2>/dev/null || true
+          git clean -fd -- .github/agents/ 2>/dev/null || true
+
+          git add -A
 
           if git diff --cached --quiet; then
             echo "No staged changes to commit"
@@ -337,7 +306,7 @@ jobs:
           echo "committed=true" >> "$GITHUB_OUTPUT"
 
       - name: Create pull request
-        if: ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.apply_changes == 'true' && steps.resolve.outputs.create_pr == 'true' && steps.commit.outputs.committed == 'true' && steps.generate.outputs.patch_ready == 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.create_pr == 'true' && steps.commit.outputs.committed == 'true' && steps.generate.outputs.agent_ran == 'true' }}
         id: pr
         uses: actions/github-script@v7
         env:
@@ -347,6 +316,11 @@ jobs:
           PR_BRANCH: ${{ steps.resolve.outputs.pr_branch }}
           BASE_BRANCH: ${{ steps.resolve.outputs.base_branch }}
         with:
+          # GH_PAT must be a fine-grained or classic PAT with pull-requests: write on this repo.
+          # If GH_PAT is not set, falls back to GITHUB_TOKEN which requires
+          # Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests"
+          # to be enabled in the repository.
+          github-token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           script: |
             const title = `Implement plan: ${process.env.PLAN_FILE}`;
             const body = [
@@ -355,7 +329,7 @@ jobs:
               `- Agent source: ${process.env.AGENT_SOURCE}`,
               `- Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
-              'Artifacts for the generated prompt, model response, and patch are attached to the workflow run.'
+              'Artifacts for the implementation prompt are attached to the workflow run.'
             ].join('\n');
 
             const response = await github.rest.pulls.create({
@@ -377,14 +351,13 @@ jobs:
             echo ""
             echo "- Selected plan: ${{ steps.resolve.outputs.plan_path }}"
             echo "- Agent source: ${{ steps.prompt.outputs.agent_file }}"
-            echo "- Patch generated: ${{ steps.generate.outputs.patch_ready }}"
-            echo "- Apply mode: ${{ steps.resolve.outputs.apply_changes }}"
+            echo "- Agent ran: ${{ steps.generate.outputs.agent_ran }}"
             echo "- Commit mode: ${{ steps.resolve.outputs.commit_changes }}"
             echo "- PR mode: ${{ steps.resolve.outputs.create_pr }}"
             echo "- PR branch: ${{ steps.resolve.outputs.pr_branch }}"
             echo "- PR URL: ${{ steps.pr.outputs.pr_url }}"
             echo ""
-            echo "Artifacts include prompt, model response, and generated patch."
+            echo "Artifacts include the implementation prompt used."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload implementation artifacts
@@ -399,7 +372,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           PLAN_PATH: ${{ steps.resolve.outputs.plan_path }}
-          PATCH_READY: ${{ steps.generate.outputs.patch_ready }}
+          AGENT_RAN: ${{ steps.generate.outputs.agent_ran }}
           AGENT_SOURCE: ${{ steps.prompt.outputs.agent_file }}
         with:
           script: |
@@ -408,9 +381,9 @@ jobs:
               "",
               `- Selected plan: ${process.env.PLAN_PATH}`,
               `- Agent source: ${process.env.AGENT_SOURCE}`,
-              `- Patch generated: ${process.env.PATCH_READY}`,
+              `- Agent ran: ${process.env.AGENT_RAN}`,
               "",
-              "Review the workflow artifacts for prompt, response, and patch details."
+              "Review the workflow artifacts for the implementation prompt details."
             ].join("\n");
 
             await github.rest.issues.createComment({

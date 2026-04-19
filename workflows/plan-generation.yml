@@ -257,6 +257,8 @@ jobs:
           fi
 
           git commit -m "chore(plans): generate ${{ steps.resolve.outputs.plan_name }}"
+          git config pull.rebase true
+          git pull
           git push
 
       - name: Comment on issue with plan details
