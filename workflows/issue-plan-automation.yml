@@ -18,7 +18,7 @@ concurrency:
 env:
   SUPERPOWERS_REPO: csheldrick/superpowers
   SUPERPOWERS_REF: main
-  SUPERPOWERS_AGENT_PATH: agents/plan-coordinator.agent.md
+  SUPERPOWERS_AGENT_PATH: skills/using-superpowers/SKILL.md
   MODEL: openai/gpt-4.1
 
 jobs:

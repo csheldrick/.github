@@ -18,7 +18,7 @@ on:
       superpowers_agent_path:
         description: "Path to the agent file inside the superpowers repository"
         required: false
-        default: "agents/plan-coordinator.agent.md"
+        default: "skills/using-superpowers/SKILL.md"
       model:
         description: "GitHub Models identifier"
         required: false
@@ -73,7 +73,7 @@ jobs:
             CREATE_PR="false"
             SUPERPOWERS_REPO="${{ github.repository_owner }}/superpowers"
             SUPERPOWERS_REF="main"
-            SUPERPOWERS_AGENT_PATH="agents/plan-coordinator.agent.md"
+            SUPERPOWERS_AGENT_PATH="skills/using-superpowers/SKILL.md"
             MODEL="openai/gpt-4.1"
           else
             PLAN_FILE="${{ inputs.plan_file }}"
@@ -135,7 +135,8 @@ jobs:
 
           AGENT_FILE="superpowers/${{ steps.resolve.outputs.superpowers_agent_path }}"
           if [ ! -f "$AGENT_FILE" ]; then
-            AGENT_FILE=".github/agents/plan-coordinator.agent.md"
+            echo "Required superpowers agent file not found: $AGENT_FILE"
+            exit 1
           fi
 
           {

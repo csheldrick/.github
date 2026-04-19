@@ -13,7 +13,7 @@ This workflow generates a markdown implementation plan in [.github/plans](../pla
 2. `plan_name` (optional): output file name without extension.
 3. `superpowers_repo` (required): your forked `superpowers` repo (`owner/repo`).
 4. `superpowers_ref` (optional): branch/tag/SHA in your fork.
-5. `superpowers_agent_path` (optional): agent file path in fork.
+5. `superpowers_agent_path` (optional): agent file path in fork. Default: `skills/using-superpowers/SKILL.md`.
 6. `model` (optional): GitHub Models ID.
 7. `commit_plan` (optional): commit generated plan back to branch.
 
@@ -30,6 +30,7 @@ This workflow generates a markdown implementation plan in [.github/plans](../pla
 
 ### Notes
 
-- The workflow checks out your forked `superpowers` repository and tries to load the specified agent file.
-- If the agent file is unavailable, it falls back to local [.github/agents/plan-coordinator.agent.md](../agents/plan-coordinator.agent.md).
+- The workflow checks out your forked `superpowers` repository and loads the specified agent file.
+- By default it uses `skills/using-superpowers/SKILL.md` from the forked `superpowers` repo.
+- If that file is unavailable, the workflow fails instead of silently using a different local agent.
 - For issue comments, commit is disabled automatically and a status comment is posted with artifact details.

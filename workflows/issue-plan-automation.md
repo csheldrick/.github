@@ -17,7 +17,7 @@ This workflow runs automatically when a new GitHub issue is opened.
 
 1. Forked superpowers repo: `csheldrick/superpowers`
 2. Forked ref: `main`
-3. Agent path: `agents/plan-coordinator.agent.md`
+3. Agent path: `skills/using-superpowers/SKILL.md`
 4. Model: `openai/gpt-4.1`
 
 ### Requirements

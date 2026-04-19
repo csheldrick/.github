@@ -12,7 +12,7 @@ This workflow executes a selected plan from [.github/plans](../plans) using agen
 1. plan_file: required plan filename inside .github/plans.
 2. superpowers_repo: required forked superpowers repository (owner/repo).
 3. superpowers_ref: optional branch, tag, or SHA from the fork.
-4. superpowers_agent_path: optional path to agent file in the fork.
+4. superpowers_agent_path: optional path to agent file in the fork. Default: `skills/using-superpowers/SKILL.md`.
 5. model: optional GitHub Models model id.
 6. apply_changes: when true, generated patch is applied.
 7. commit_changes: when true and create_pr is false, changes are committed and pushed to the current branch.
@@ -21,8 +21,8 @@ This workflow executes a selected plan from [.github/plans](../plans) using agen
 ### What It Does
 
 1. Validates plan selection and file safety.
-2. Loads an agent definition from your forked superpowers repo.
-3. Falls back to local [.github/agents/plan-coordinator.agent.md](../agents/plan-coordinator.agent.md) if the forked file is unavailable.
+2. Loads `skills/using-superpowers/SKILL.md` from your forked superpowers repo by default.
+3. Fails if the required forked agent file is unavailable.
 4. Builds an implementation prompt from the selected plan and agent instructions.
 5. Generates a unified diff patch through GitHub Models when GH_MODELS_API_KEY is configured.
 6. Optionally applies and commits the patch.
