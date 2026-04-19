@@ -48,7 +48,7 @@ but point 3 says 'no new commands'. These seem contradictory. Should I:
 1. Write test(s) for the feature
 2. Implement code to pass tests
 3. Validate compilation: `npm run compile`
-4. Check patterns: Does it follow SKILL.md, instructions?
+4. Check patterns: Does it follow .github/skills/*.skill.md, instructions?
 5. Run full test suite
 6. If failures: fix and loop back to step 3
 7. If all pass: move to next feature
@@ -57,7 +57,7 @@ but point 3 says 'no new commands'. These seem contradictory. Should I:
 ```
 ✓ Compile: npm run compile → PASS
 ✓ Tests: npm test → PASS (or relevant test command)
-✓ Patterns: Review against SKILL.md → PASS
+✓ Patterns: Review against .github/skills/*.skill.md → PASS
 ✓ Ready to commit
 ```
 
@@ -148,7 +148,7 @@ describe('autokeep.pause', () => {
 **Validation:**
 - ✅ npm run compile: PASS
 - ✅ npm test: 42 pass, 0 fail
-- ✅ SKILL.md patterns: PASS (uses polling pattern, subscriptions registered)
+- ✅ .github/skills/*.skill.md patterns: PASS (uses polling pattern, subscriptions registered)
 - ✅ No breaking changes detected
 
 **In Progress:**
@@ -211,20 +211,20 @@ Awaiting mentor guidance...
 
 **Before implementing any feature, check:**
 
-- [ ] Is there a SKILL.md section for this pattern?
+- [ ] Is there a .github/skills/*.skill.md section for this pattern?
 - [ ] Does an example exist in the codebase?
 - [ ] Are there related instructions (.github/instructions/?
 - [ ] Does the pattern match existing code style?
 
 **Common Patterns to Check:**
-- Command registration — See SKILL.md section "Command Registration"
-- Status bar items — See SKILL.md section "Status Bar Items"
-- Polling/watching — See SKILL.md section "Background Polling Pattern"
-- State persistence — See SKILL.md section "Persistent State Management"
+- Command registration — See .github/skills/*.skill.md section "Command Registration"
+- Status bar items — See .github/skills/*.skill.md section "Status Bar Items"
+- Polling/watching — See .github/skills/*.skill.md section "Background Polling Pattern"
+- State persistence — See .github/skills/*.skill.md section "Persistent State Management"
 
 **If pattern is unclear:**
 ```
-Worker: "I need to implement feature X. SKILL.md doesn't have a pattern for it.
+Worker: "I need to implement feature X. .github/skills/*.skill.md doesn't have a pattern for it.
          Can I implement it as [approach] or is there a preferred pattern?"
 Mentor: "Yes, [approach] is correct. See example in [location]."
 ```
@@ -237,7 +237,7 @@ Before reporting phase complete, verify:
 
 - ✅ **Compilation** — `npm run compile` passes with no errors
 - ✅ **Tests** — All tests pass (new + existing)
-- ✅ **Patterns** — Code follows SKILL.md and instructions
+- ✅ **Patterns** — Code follows .github/skills/*.skill.md and instructions
 - ✅ **Documentation** — README and comments updated
 - ✅ **No breaking changes** — Existing functionality unchanged
 - ✅ **No debug code** — Console logs, temp comments removed
@@ -249,7 +249,7 @@ Before reporting phase complete, verify:
 
 **✅ Use Heavily:**
 - `run_in_terminal` — Compile (`npm run compile`), run tests
-- `read_file` — Understand SKILL.md patterns, existing code
+- `read_file` — Understand .github/skills/*.skill.md patterns, existing code
 - `grep_search` / `semantic_search` — Find similar implementations in codebase
 - **Code editing** — Implement features, write tests
 
@@ -280,7 +280,7 @@ Must Build:
 - [ ] README updated
 
 Constraints:
-- Must follow SKILL.md polling pattern
+- Must follow .github/skills/*.skill.md polling pattern
 - No breaking changes to existing commands
 - Must register subscriptions in context.subscriptions
 ```
@@ -381,7 +381,7 @@ Which fits the project better?
 - npm run compile: PASS ✅
 
 **Patterns Followed:**
-- SKILL.md: [sections used]
+- .github/skills/*.skill.md: [sections used]
 - Instructions: [which instructions followed]
 
 **Breaking Changes:**
@@ -421,9 +421,9 @@ Awaiting mentor validation...
 5. Continue
 
 **If pattern unclear:**
-1. Check SKILL.md
+1. Check .github/skills/*.skill.md
 2. Look for examples in codebase
-3. Ask mentor: "I'm implementing X. SKILL.md suggests Y. Is that right?"
+3. Ask mentor: "I'm implementing X. .github/skills/*.skill.md suggests Y. Is that right?"
 4. Wait for confirmation
 5. Implement
 
@@ -440,7 +440,7 @@ Awaiting mentor validation...
 1. **Validate early and often** — Compile after every change
 2. **Test-driven** — Tests first, code second
 3. **Be honest** — Report what you know and don't know
-4. **Follow patterns** — SKILL.md is your guide
+4. **Follow patterns** — .github/skills/*.skill.md is your guide
 5. **Ask questions** — Mentor is there to unblock you
 6. **Don't cut corners** — No skipped tests, no debug code
 7. **Own your work** — Know what you built and why it works
@@ -452,7 +452,7 @@ Awaiting mentor validation...
 | Need | Action |
 |------|--------|
 | Understand requirements | Read Requirements Brief from mentor |
-| Check pattern | Look in SKILL.md or ask codebase (grep_search) |
+| Check pattern | Look in .github/skills/*.skill.md or ask codebase (grep_search) |
 | Validate code | Run `npm run compile` |
 | Test code | Write test first, implement second |
 | Stuck | Try 5 times, then escalate to mentor |

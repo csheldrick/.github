@@ -1,0 +1,347 @@
+name: Implement Plan From Library
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Implement plan {0}', inputs.plan_file) || format('Implement plan comment-{0}', github.run_number) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan_file:
+        description: "Plan filename in .github/plans (for example: my-plan.md)"
+        required: true
+      superpowers_repo:
+        description: "Forked superpowers repository in owner/repo format"
+        required: true
+        default: "csheldrick/superpowers"
+      superpowers_ref:
+        description: "Branch, tag, or SHA from the forked superpowers repository"
+        required: false
+        default: "main"
+      superpowers_agent_path:
+        description: "Path to the agent file inside the superpowers repository"
+        required: false
+        default: "agents/plan-coordinator.agent.md"
+      model:
+        description: "GitHub Models identifier"
+        required: false
+        default: "openai/gpt-4.1"
+      apply_changes:
+        description: "Apply generated patch to repository"
+        required: false
+        type: boolean
+        default: false
+      commit_changes:
+        description: "Commit and push applied changes"
+        required: false
+        type: boolean
+        default: false
+      create_pr:
+        description: "Create a pull request after committing changes"
+        required: false
+        type: boolean
+        default: true
+
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  implement:
+    name: Implement Selected Plan
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/implement-plan '))
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve execution inputs
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            BODY="${{ github.event.comment.body }}"
+            PLAN_FILE="${BODY#'/implement-plan '}"
+            APPLY_CHANGES="false"
+            COMMIT_CHANGES="false"
+            CREATE_PR="false"
+            SUPERPOWERS_REPO="${{ github.repository_owner }}/superpowers"
+            SUPERPOWERS_REF="main"
+            SUPERPOWERS_AGENT_PATH="agents/plan-coordinator.agent.md"
+            MODEL="openai/gpt-4.1"
+          else
+            PLAN_FILE="${{ inputs.plan_file }}"
+            APPLY_CHANGES="${{ inputs.apply_changes }}"
+            COMMIT_CHANGES="${{ inputs.commit_changes }}"
+            CREATE_PR="${{ inputs.create_pr }}"
+            SUPERPOWERS_REPO="${{ inputs.superpowers_repo }}"
+            SUPERPOWERS_REF="${{ inputs.superpowers_ref }}"
+            SUPERPOWERS_AGENT_PATH="${{ inputs.superpowers_agent_path }}"
+            MODEL="${{ inputs.model }}"
+          fi
+
+          PLAN_SLUG="$(echo "$PLAN_FILE" | sed -E 's/\.md$//' | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-40)"
+          if [ -z "$PLAN_SLUG" ]; then
+            PLAN_SLUG="plan"
+          fi
+
+          PR_BRANCH="plan-implementation/${PLAN_SLUG}-${{ github.run_number }}"
+          BASE_BRANCH="${GITHUB_REF_NAME:-main}"
+
+          if ! [[ "$PLAN_FILE" =~ ^[A-Za-z0-9._-]+\.md$ ]]; then
+            echo "Invalid plan file. Use a filename like feature-plan.md"
+            exit 1
+          fi
+
+          PLAN_PATH=".github/plans/$PLAN_FILE"
+          if [ ! -f "$PLAN_PATH" ]; then
+            echo "Plan file not found: $PLAN_PATH"
+            exit 1
+          fi
+
+          echo "plan_file=$PLAN_FILE" >> "$GITHUB_OUTPUT"
+          echo "plan_path=$PLAN_PATH" >> "$GITHUB_OUTPUT"
+          echo "apply_changes=$APPLY_CHANGES" >> "$GITHUB_OUTPUT"
+          echo "commit_changes=$COMMIT_CHANGES" >> "$GITHUB_OUTPUT"
+          echo "create_pr=$CREATE_PR" >> "$GITHUB_OUTPUT"
+          echo "superpowers_repo=$SUPERPOWERS_REPO" >> "$GITHUB_OUTPUT"
+          echo "superpowers_ref=$SUPERPOWERS_REF" >> "$GITHUB_OUTPUT"
+          echo "superpowers_agent_path=$SUPERPOWERS_AGENT_PATH" >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "pr_branch=$PR_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout forked superpowers repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.resolve.outputs.superpowers_repo }}
+          ref: ${{ steps.resolve.outputs.superpowers_ref }}
+          path: superpowers
+        continue-on-error: true
+
+      - name: Build implementation prompt package
+        id: prompt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p implementation-output
+
+          AGENT_FILE="superpowers/${{ steps.resolve.outputs.superpowers_agent_path }}"
+          if [ ! -f "$AGENT_FILE" ]; then
+            AGENT_FILE=".github/agents/plan-coordinator.agent.md"
+          fi
+
+          {
+            echo "You are implementing a plan in this repository."
+            echo "Use AGENT INSTRUCTIONS and PLAN to generate a valid unified diff patch only."
+            echo ""
+            echo "REPOSITORY CONTEXT:"
+            echo "- Project: AutoKeep Copilot VS Code extension"
+            echo "- Allowed implementation files: src/**, README.md, package.json, tsconfig.json, .github/workflows/**"
+            echo "- Validation commands: npm run compile"
+            echo ""
+            echo "AGENT INSTRUCTIONS:"
+            cat "$AGENT_FILE"
+            echo ""
+            echo "SELECTED PLAN:"
+            cat "${{ steps.resolve.outputs.plan_path }}"
+            echo ""
+            echo "OUTPUT FORMAT (STRICT):"
+            echo "- Return only a unified diff patch."
+            echo "- Start with 'diff --git'."
+            echo "- Do not wrap output in code fences."
+          } > implementation-output/implementation-prompt.txt
+
+          echo "agent_file=$AGENT_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Generate implementation patch via GitHub Models
+        id: generate
+        shell: bash
+        env:
+          GH_MODELS_API_KEY: ${{ secrets['GH_MODELS_API_KEY'] || '' }}
+        run: |
+          set -euo pipefail
+
+          PATCH_FILE="implementation-output/generated.patch"
+          RAW_FILE="implementation-output/model-response.txt"
+
+          if [ -n "${GH_MODELS_API_KEY:-}" ]; then
+            jq -Rs --arg model "${{ steps.resolve.outputs.model }}" '{
+              model: $model,
+              messages: [
+                {role: "system", content: "You are an expert software implementation assistant."},
+                {role: "user", content: .}
+              ],
+              temperature: 0.1
+            }' implementation-output/implementation-prompt.txt > implementation-output/model-request.json
+
+            curl -sS -f \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer ${GH_MODELS_API_KEY}" \
+              https://models.inference.ai.azure.com/chat/completions \
+              -d @implementation-output/model-request.json > implementation-output/model-response.json
+
+            jq -r '.choices[0].message.content // empty' implementation-output/model-response.json > "$RAW_FILE"
+          else
+            {
+              echo "GH_MODELS_API_KEY is not configured."
+              echo "No model patch was generated."
+            } > "$RAW_FILE"
+          fi
+
+          awk 'BEGIN{copy=0} /^diff --git /{copy=1} copy{print}' "$RAW_FILE" > "$PATCH_FILE" || true
+
+          if [ ! -s "$PATCH_FILE" ]; then
+            echo "patch_ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "patch_ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "patch_file=$PATCH_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Apply generated patch
+        id: apply
+        if: ${{ steps.resolve.outputs.apply_changes == 'true' && steps.generate.outputs.patch_ready == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git apply --index "${{ steps.generate.outputs.patch_file }}"
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        if: ${{ steps.resolve.outputs.apply_changes == 'true' && steps.generate.outputs.patch_ready == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        if: ${{ steps.resolve.outputs.apply_changes == 'true' && steps.generate.outputs.patch_ready == 'true' }}
+        run: npm install
+
+      - name: Validate compilation
+        if: ${{ steps.resolve.outputs.apply_changes == 'true' && steps.generate.outputs.patch_ready == 'true' }}
+        run: npm run compile
+        continue-on-error: true
+
+      - name: Commit applied implementation
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.apply_changes == 'true' && (steps.resolve.outputs.commit_changes == 'true' || steps.resolve.outputs.create_pr == 'true') && steps.generate.outputs.patch_ready == 'true' }}
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --cached --quiet; then
+            echo "No staged changes to commit"
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ steps.resolve.outputs.create_pr }}" = "true" ]; then
+            git switch -c "${{ steps.resolve.outputs.pr_branch }}"
+          fi
+
+          git commit -m "chore(plans): implement ${{ steps.resolve.outputs.plan_file }}"
+
+          if [ "${{ steps.resolve.outputs.create_pr }}" = "true" ]; then
+            git push --set-upstream origin "${{ steps.resolve.outputs.pr_branch }}"
+          else
+            git push
+          fi
+
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.apply_changes == 'true' && steps.resolve.outputs.create_pr == 'true' && steps.commit.outputs.committed == 'true' && steps.generate.outputs.patch_ready == 'true' }}
+        id: pr
+        uses: actions/github-script@v7
+        env:
+          PLAN_FILE: ${{ steps.resolve.outputs.plan_file }}
+          PLAN_PATH: ${{ steps.resolve.outputs.plan_path }}
+          AGENT_SOURCE: ${{ steps.prompt.outputs.agent_file }}
+          PR_BRANCH: ${{ steps.resolve.outputs.pr_branch }}
+          BASE_BRANCH: ${{ steps.resolve.outputs.base_branch }}
+        with:
+          script: |
+            const title = `Implement plan: ${process.env.PLAN_FILE}`;
+            const body = [
+              `Implements the selected plan from ${process.env.PLAN_PATH}.`,
+              '',
+              `- Agent source: ${process.env.AGENT_SOURCE}`,
+              `- Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'Artifacts for the generated prompt, model response, and patch are attached to the workflow run.'
+            ].join('\n');
+
+            const response = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              head: process.env.PR_BRANCH,
+              base: process.env.BASE_BRANCH,
+              body
+            });
+
+            core.setOutput('pr_url', response.data.html_url);
+
+      - name: Write run summary
+        shell: bash
+        run: |
+          {
+            echo "## Plan Implementation Run"
+            echo ""
+            echo "- Selected plan: ${{ steps.resolve.outputs.plan_path }}"
+            echo "- Agent source: ${{ steps.prompt.outputs.agent_file }}"
+            echo "- Patch generated: ${{ steps.generate.outputs.patch_ready }}"
+            echo "- Apply mode: ${{ steps.resolve.outputs.apply_changes }}"
+            echo "- Commit mode: ${{ steps.resolve.outputs.commit_changes }}"
+            echo "- PR mode: ${{ steps.resolve.outputs.create_pr }}"
+            echo "- PR branch: ${{ steps.resolve.outputs.pr_branch }}"
+            echo "- PR URL: ${{ steps.pr.outputs.pr_url }}"
+            echo ""
+            echo "Artifacts include prompt, model response, and generated patch."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload implementation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-implementation-${{ steps.resolve.outputs.plan_file }}
+          path: implementation-output/
+          retention-days: 14
+
+      - name: Comment on issue with implementation status
+        if: ${{ github.event_name == 'issue_comment' }}
+        uses: actions/github-script@v7
+        env:
+          PLAN_PATH: ${{ steps.resolve.outputs.plan_path }}
+          PATCH_READY: ${{ steps.generate.outputs.patch_ready }}
+          AGENT_SOURCE: ${{ steps.prompt.outputs.agent_file }}
+        with:
+          script: |
+            const body = [
+              "Plan implementation run complete.",
+              "",
+              `- Selected plan: ${process.env.PLAN_PATH}`,
+              `- Agent source: ${process.env.AGENT_SOURCE}`,
+              `- Patch generated: ${process.env.PATCH_READY}`,
+              "",
+              "Review the workflow artifacts for prompt, response, and patch details."
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });

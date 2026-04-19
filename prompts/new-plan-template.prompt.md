@@ -41,7 +41,7 @@ Copy the template below and fill in your plan:
 **Success Criteria:**
 1. ✅ [Code compiles with no TypeScript errors]
 2. ✅ [Tests pass (specify count)]
-3. ✅ [Follows SKILL.md pattern: [section name]]
+3. ✅ [Follows .github/skills/*.skill.md pattern: [section name]]
 4. ✅ [No breaking changes to [what]]
 5. ✅ [Documentation updated: [what]]
 
@@ -91,7 +91,7 @@ Copy the template below and fill in your plan:
 Before writing your plan, answer:
 1. **What is the main feature or fix?** (objective)
 2. **How many independent work streams?** (phases)
-3. **What patterns apply?** (SKILL.md sections)
+3. **What patterns apply?** (.github/skills/*.skill.md sections)
 4. **What could break?** (constraints)
 5. **How will we know it's done?** (success criteria)
 ```
@@ -125,8 +125,8 @@ Before writing your plan, answer:
 - [ ] Add status bar indicator for pause state
 
 **Constraints:**
-- Must follow SKILL.md "Command Registration" pattern
-- Must follow SKILL.md "Persistent State Management" pattern
+- Must follow .github/skills/*.skill.md "Command Registration" pattern
+- Must follow .github/skills/*.skill.md "Persistent State Management" pattern
 - Must not break existing toggle functionality
 - Must register all subscriptions in context.subscriptions
 - No new external dependencies
@@ -134,7 +134,7 @@ Before writing your plan, answer:
 **Success Criteria:**
 1. ✅ Code compiles (npm run compile)
 2. ✅ Tests pass (add minimum 4 new tests for pause/resume)
-3. ✅ Follows SKILL.md Command Registration pattern
+3. ✅ Follows .github/skills/*.skill.md Command Registration pattern
 4. ✅ State persists (pause state survives restart)
 5. ✅ No breaking changes (existing toggle still works)
 6. ✅ README updated with new commands

@@ -1,0 +1,265 @@
+name: Issue Plan Automation
+run-name: Issue automation #${{ github.event.issue.number }}
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: issue-plan-automation-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+env:
+  SUPERPOWERS_REPO: csheldrick/superpowers
+  SUPERPOWERS_REF: main
+  SUPERPOWERS_AGENT_PATH: agents/plan-coordinator.agent.md
+  MODEL: openai/gpt-4.1
+
+jobs:
+  automate:
+    name: Generate And Implement Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Resolve issue context
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          TITLE_SLUG="$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-40)"
+
+          if [ -z "$TITLE_SLUG" ]; then
+            TITLE_SLUG="issue"
+          fi
+
+          PLAN_NAME="issue-${ISSUE_NUMBER}-${TITLE_SLUG}"
+          PLAN_FILE="${PLAN_NAME}.md"
+
+          {
+            echo "issue_request<<EOF"
+            echo "Issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}"
+            echo ""
+            echo "${{ github.event.issue.body }}"
+            echo ""
+            echo "Issue URL: ${{ github.event.issue.html_url }}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "plan_name=$PLAN_NAME" >> "$GITHUB_OUTPUT"
+          echo "plan_file=$PLAN_FILE" >> "$GITHUB_OUTPUT"
+          echo "default_branch=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Comment that automation started
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              'Issue automation started.',
+              '',
+              `- Planned file: .github/plans/${{ steps.resolve.outputs.plan_file }}`,
+              `- Generation workflow: plan-generation.yml`,
+              `- Implementation workflow: plan-implementation.yml`
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+      - name: Dispatch plan generation workflow
+        uses: actions/github-script@v7
+        env:
+          ISSUE_REQUEST: ${{ steps.resolve.outputs.issue_request }}
+          SUPERPOWERS_REPO: ${{ env.SUPERPOWERS_REPO }}
+          SUPERPOWERS_REF: ${{ env.SUPERPOWERS_REF }}
+          SUPERPOWERS_AGENT_PATH: ${{ env.SUPERPOWERS_AGENT_PATH }}
+          MODEL: ${{ env.MODEL }}
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'plan-generation.yml',
+              ref: '${{ steps.resolve.outputs.default_branch }}',
+              inputs: {
+                user_request: process.env.ISSUE_REQUEST,
+                plan_name: '${{ steps.resolve.outputs.plan_name }}',
+                superpowers_repo: process.env.SUPERPOWERS_REPO,
+                superpowers_ref: process.env.SUPERPOWERS_REF,
+                superpowers_agent_path: process.env.SUPERPOWERS_AGENT_PATH,
+                model: process.env.MODEL,
+                commit_plan: 'true'
+              }
+            });
+
+      - name: Wait for plan generation workflow
+        id: generation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expectedTitle = `Generate plan ${{ steps.resolve.outputs.plan_name }}`;
+            const workflowId = 'plan-generation.yml';
+            const branch = '${{ steps.resolve.outputs.default_branch }}';
+
+            let matchedRun;
+            for (let attempt = 0; attempt < 180; attempt += 1) {
+              const response = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: workflowId,
+                branch,
+                event: 'workflow_dispatch',
+                per_page: 20
+              });
+
+              matchedRun = response.data.workflow_runs.find((run) => run.display_title === expectedTitle);
+              if (matchedRun && matchedRun.status === 'completed') {
+                core.setOutput('generation_run_url', matchedRun.html_url);
+                core.setOutput('generation_conclusion', matchedRun.conclusion || 'unknown');
+                if (matchedRun.conclusion !== 'success') {
+                  core.setFailed(`Plan generation workflow concluded with ${matchedRun.conclusion}`);
+                }
+                return;
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, 10000));
+            }
+
+            core.setFailed(`Timed out waiting for ${expectedTitle}`);
+      - name: Verify committed plan exists
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.getContent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path: `.github/plans/${{ steps.resolve.outputs.plan_file }}`,
+              ref: '${{ steps.resolve.outputs.default_branch }}'
+            });
+
+      - name: Dispatch plan implementation workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'plan-implementation.yml',
+              ref: '${{ steps.resolve.outputs.default_branch }}',
+              inputs: {
+                plan_file: '${{ steps.resolve.outputs.plan_file }}',
+                superpowers_repo: process.env.SUPERPOWERS_REPO,
+                superpowers_ref: process.env.SUPERPOWERS_REF,
+                superpowers_agent_path: process.env.SUPERPOWERS_AGENT_PATH,
+                model: process.env.MODEL,
+                apply_changes: 'true',
+                commit_changes: 'false',
+                create_pr: 'true'
+              }
+            });
+        env:
+          SUPERPOWERS_REPO: ${{ env.SUPERPOWERS_REPO }}
+          SUPERPOWERS_REF: ${{ env.SUPERPOWERS_REF }}
+          SUPERPOWERS_AGENT_PATH: ${{ env.SUPERPOWERS_AGENT_PATH }}
+          MODEL: ${{ env.MODEL }}
+
+      - name: Wait for plan implementation workflow
+        id: implementation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expectedTitle = `Implement plan ${{ steps.resolve.outputs.plan_file }}`;
+            const workflowId = 'plan-implementation.yml';
+            const branch = '${{ steps.resolve.outputs.default_branch }}';
+
+            let matchedRun;
+            for (let attempt = 0; attempt < 240; attempt += 1) {
+              const response = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: workflowId,
+                branch,
+                event: 'workflow_dispatch',
+                per_page: 20
+              });
+
+              matchedRun = response.data.workflow_runs.find((run) => run.display_title === expectedTitle);
+              if (matchedRun && matchedRun.status === 'completed') {
+                core.setOutput('implementation_run_url', matchedRun.html_url);
+                core.setOutput('implementation_conclusion', matchedRun.conclusion || 'unknown');
+                if (matchedRun.conclusion !== 'success') {
+                  core.setFailed(`Plan implementation workflow concluded with ${matchedRun.conclusion}`);
+                }
+                return;
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, 15000));
+            }
+
+            core.setFailed(`Timed out waiting for ${expectedTitle}`);
+
+      - name: Find created pull request
+        id: pull_request
+        if: ${{ success() }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const response = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              sort: 'updated',
+              direction: 'desc',
+              per_page: 20
+            });
+
+            const title = `Implement plan: ${{ steps.resolve.outputs.plan_file }}`;
+            const pullRequest = response.data.find((pr) => pr.title === title);
+            core.setOutput('pr_url', pullRequest ? pullRequest.html_url : '');
+
+      - name: Comment automation result
+        if: ${{ always() }}
+        uses: actions/github-script@v7
+        env:
+          JOB_STATUS: ${{ job.status }}
+          PLAN_FILE: ${{ steps.resolve.outputs.plan_file }}
+          GENERATION_RUN_URL: ${{ steps.generation.outputs.generation_run_url }}
+          IMPLEMENTATION_RUN_URL: ${{ steps.implementation.outputs.implementation_run_url }}
+          PULL_REQUEST_URL: ${{ steps.pull_request.outputs.pr_url }}
+        with:
+          script: |
+            const lines = [
+              `Issue automation ${process.env.JOB_STATUS}.`,
+              '',
+              `- Plan file: .github/plans/${process.env.PLAN_FILE}`,
+              `- Generation workflow run: ${process.env.GENERATION_RUN_URL || 'not available'}`,
+              `- Implementation workflow run: ${process.env.IMPLEMENTATION_RUN_URL || 'not available'}`
+            ];
+
+            if (process.env.PULL_REQUEST_URL) {
+              lines.push(`- Pull request: ${process.env.PULL_REQUEST_URL}`);
+            }
+
+            if (process.env.JOB_STATUS !== 'success') {
+              lines.push('');
+              lines.push('Check the linked workflow runs for the failing step.');
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: lines.join('\n')
+            });

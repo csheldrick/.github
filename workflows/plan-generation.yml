@@ -1,0 +1,264 @@
+name: Generate Implementation Plan
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Generate plan {0}', inputs.plan_name != '' && inputs.plan_name || 'generated-plan') || format('Generate plan comment-{0}', github.run_number) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      user_request:
+        description: "Natural-language request to convert into an implementation plan"
+        required: true
+      plan_name:
+        description: "Optional output filename (without extension). Auto-generated when empty."
+        required: false
+        default: ""
+      superpowers_repo:
+        description: "Forked superpowers repository in owner/repo format"
+        required: true
+        default: "csheldrick/superpowers"
+      superpowers_ref:
+        description: "Branch, tag, or SHA from the forked superpowers repository"
+        required: false
+        default: "main"
+      superpowers_agent_path:
+        description: "Path to the agent file inside the superpowers repository"
+        required: false
+        default: "agents/plan-coordinator.agent.md"
+      model:
+        description: "GitHub Models identifier"
+        required: false
+        default: "openai/gpt-4.1"
+      commit_plan:
+        description: "Commit generated plan to the triggering branch"
+        required: false
+        type: boolean
+        default: true
+
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  generate:
+    name: Generate Plan File
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/plan '))
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve request and filename
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            REQUEST="${{ github.event.comment.body }}"
+            REQUEST="${REQUEST#'/plan '}"
+            PLAN_NAME=""
+            COMMIT_PLAN="false"
+            SUPERPOWERS_REPO="${{ github.repository_owner }}/superpowers"
+            SUPERPOWERS_REF="main"
+            SUPERPOWERS_AGENT_PATH="agents/plan-coordinator.agent.md"
+            MODEL="openai/gpt-4.1"
+          else
+            REQUEST="${{ inputs.user_request }}"
+            PLAN_NAME="${{ inputs.plan_name }}"
+            COMMIT_PLAN="${{ inputs.commit_plan }}"
+            SUPERPOWERS_REPO="${{ inputs.superpowers_repo }}"
+            SUPERPOWERS_REF="${{ inputs.superpowers_ref }}"
+            SUPERPOWERS_AGENT_PATH="${{ inputs.superpowers_agent_path }}"
+            MODEL="${{ inputs.model }}"
+          fi
+
+          if [ -z "$PLAN_NAME" ]; then
+            PLAN_NAME="$(echo "$REQUEST" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-64)"
+          fi
+
+          if [ -z "$PLAN_NAME" ]; then
+            PLAN_NAME="generated-plan"
+          fi
+
+          {
+            echo "request<<EOF"
+            echo "$REQUEST"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "plan_name=$PLAN_NAME" >> "$GITHUB_OUTPUT"
+          echo "commit_plan=$COMMIT_PLAN" >> "$GITHUB_OUTPUT"
+          echo "superpowers_repo=$SUPERPOWERS_REPO" >> "$GITHUB_OUTPUT"
+          echo "superpowers_ref=$SUPERPOWERS_REF" >> "$GITHUB_OUTPUT"
+          echo "superpowers_agent_path=$SUPERPOWERS_AGENT_PATH" >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout forked superpowers repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.resolve.outputs.superpowers_repo }}
+          ref: ${{ steps.resolve.outputs.superpowers_ref }}
+          path: superpowers
+        continue-on-error: true
+
+      - name: Build generation prompt
+        id: prompt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AGENT_FILE="superpowers/${{ steps.resolve.outputs.superpowers_agent_path }}"
+          TEMPLATE_FILE=".github/prompts/new-plan-template.prompt.md"
+
+          if [ ! -f "$AGENT_FILE" ]; then
+            AGENT_FILE=".github/agents/plan-coordinator.agent.md"
+          fi
+
+          {
+            echo "You are generating an implementation plan markdown file for this repository."
+            echo "Use the AGENT INSTRUCTIONS and TEMPLATE PATTERN below."
+            echo "Keep the output practical and directly executable."
+            echo ""
+            echo "USER REQUEST:"
+            echo "${{ steps.resolve.outputs.request }}"
+            echo ""
+            echo "REPOSITORY CONTEXT:"
+            echo "- Project: AutoKeep Copilot VS Code extension"
+            echo "- Primary files: src/extension.ts, package.json, tsconfig.json, README.md"
+            echo "- Build check: npm run compile"
+            echo ""
+            echo "AGENT INSTRUCTIONS:"
+            cat "$AGENT_FILE"
+            echo ""
+            echo "PLAN TEMPLATE REFERENCE:"
+            cat "$TEMPLATE_FILE"
+            echo ""
+            echo "OUTPUT REQUIREMENTS:"
+            echo "- Return markdown only (no code fences)."
+            echo "- Include objective, phased tasks, constraints, dependencies, and measurable success criteria."
+            echo "- Keep phase goals concrete for implementation in this repository."
+            echo "- Include a final validation phase with compile and packaging checks."
+          } > generation-prompt.txt
+
+          echo "agent_file=$AGENT_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Generate plan via GitHub Models
+        id: generate
+        shell: bash
+        env:
+          GH_MODELS_API_KEY: ${{ secrets['GH_MODELS_API_KEY'] }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p .github/plans
+          PLAN_FILE=".github/plans/${{ steps.resolve.outputs.plan_name }}.md"
+
+          if [ -n "${GH_MODELS_API_KEY:-}" ]; then
+            jq -Rs --arg model "${{ steps.resolve.outputs.model }}" '{
+              model: $model,
+              messages: [
+                {role: "system", content: "You are an expert software planning assistant."},
+                {role: "user", content: .}
+              ],
+              temperature: 0.2
+            }' generation-prompt.txt > model-request.json
+
+            curl -sS -f \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer ${GH_MODELS_API_KEY}" \
+              https://models.inference.ai.azure.com/chat/completions \
+              -d @model-request.json > model-response.json
+
+            jq -r '.choices[0].message.content // empty' model-response.json > "$PLAN_FILE"
+          else
+            {
+              echo "# Implementation Plan: ${{ steps.resolve.outputs.plan_name }}"
+              echo ""
+              echo "**Objective:**"
+              echo "- ${{ steps.resolve.outputs.request }}"
+              echo ""
+              echo "## Phase 1: Scope and Design"
+              echo "- Clarify acceptance criteria and identify impacted files."
+              echo "- Confirm extension constraints and API-safe implementation details."
+              echo ""
+              echo "## Phase 2: Implementation"
+              echo "- Implement changes in minimal, testable increments."
+              echo "- Keep behavior aligned with current extension architecture."
+              echo ""
+              echo "## Phase 3: Validation"
+              echo "- Run npm run compile."
+              echo "- Package with vsce package when applicable."
+              echo ""
+              echo "## Constraints"
+              echo "- Follow stable VS Code APIs only."
+              echo "- Keep extension lightweight."
+              echo "- Do not modify unrelated files."
+              echo ""
+              echo "## Success Criteria"
+              echo "1. Plan is actionable and phase-based."
+              echo "2. Build validation commands are included."
+              echo "3. Risks and constraints are explicit."
+            } > "$PLAN_FILE"
+          fi
+
+          if [ ! -s "$PLAN_FILE" ]; then
+            echo "Generated plan is empty"
+            exit 1
+          fi
+
+          echo "plan_file=$PLAN_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload generated plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-plan-${{ steps.resolve.outputs.plan_name }}
+          path: ${{ steps.generate.outputs.plan_file }}
+          retention-days: 14
+
+      - name: Commit generated plan
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.commit_plan == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${{ steps.generate.outputs.plan_file }}"
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "chore(plans): generate ${{ steps.resolve.outputs.plan_name }}"
+          git push
+
+      - name: Comment on issue with plan details
+        if: ${{ github.event_name == 'issue_comment' }}
+        uses: actions/github-script@v7
+        env:
+          PLAN_REQUEST: ${{ steps.resolve.outputs.request }}
+          PLAN_FILE: ${{ steps.generate.outputs.plan_file }}
+          AGENT_SOURCE: ${{ steps.prompt.outputs.agent_file }}
+        with:
+          script: |
+            const body = [
+              "Plan generation complete.",
+              "",
+              `- Request: ${process.env.PLAN_REQUEST}`,
+              `- Plan file: ${process.env.PLAN_FILE}`,
+              `- Agent source: ${process.env.AGENT_SOURCE}`,
+              "",
+              "Download the generated plan from the workflow artifacts."
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
