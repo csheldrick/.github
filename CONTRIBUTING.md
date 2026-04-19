@@ -9,6 +9,9 @@ First off, thank you for taking the time to contribute to this project! 🎉
 - [Commit Conventions](#commit-conventions)
 - [Code Review Process](#code-review-process)
 - [Testing Requirements](#testing-requirements)
+- [Security Considerations](#security-considerations)
+- [Dependency Management](#dependency-management)
+- [Accessibility](#accessibility)
 - [Guidelines](#guidelines)
 - [Reporting Issues](#reporting-issues)
 
@@ -56,6 +59,7 @@ Follow the [Conventional Commits](https://www.conventionalcommits.org/) specific
 | `refactor` | Code change that neither fixes a bug nor adds a feature |
 | `test`     | Adding or updating tests                         |
 | `chore`    | Build process or auxiliary tool changes          |
+| `security` | Security-related fixes or improvements           |
 
 ### Examples
 
@@ -63,6 +67,7 @@ Follow the [Conventional Commits](https://www.conventionalcommits.org/) specific
 feat(auth): add OAuth2 login support
 fix(api): handle null response from user endpoint
 docs(readme): update installation instructions
+security(deps): update lodash to patch CVE-2021-23337
 ```
 
 - Keep the subject line under 72 characters.
@@ -91,6 +96,41 @@ docs(readme): update installation instructions
 
 ---
 
+## Security Considerations
+
+Security is a shared responsibility. Before submitting a pull request:
+
+- **Never commit secrets or credentials.** Use environment variables and a `.env.example` file to document required variables.
+- **Sanitize and validate all user inputs** to prevent injection attacks (SQL, XSS, command injection, etc.).
+- **Avoid introducing dependencies with known vulnerabilities.** Run `npm audit` / `pip audit` / equivalent and resolve any `high` or `critical` issues.
+- **Apply the principle of least privilege** — limit the permissions and access required by your code.
+- **Review GitHub Actions workflows** for command injection risks when using untrusted input (e.g., PR titles, issue bodies).
+- If you discover a security vulnerability, follow the [Security Policy](SECURITY.md) instead of opening a public issue.
+
+---
+
+## Dependency Management
+
+- Prefer well-maintained, widely adopted libraries with active security patching.
+- Avoid adding new dependencies unless they provide significant value that cannot be achieved with existing code.
+- Pin dependency versions in lock files (`package-lock.json`, `requirements.txt`, etc.) to ensure reproducible builds.
+- Keep dependencies up to date; respond to Dependabot or Renovate alerts promptly.
+- Review the license of any new dependency to ensure compatibility with the project license.
+
+---
+
+## Accessibility
+
+When contributing UI or documentation changes:
+
+- Ensure HTML elements use appropriate semantic markup.
+- Provide `alt` text for all images.
+- Ensure sufficient color contrast for text and interactive elements (minimum WCAG AA).
+- Test keyboard navigation for interactive components.
+- Avoid relying solely on color to convey information.
+
+---
+
 ## Guidelines
 
 - Keep commits descriptively short.
@@ -99,6 +139,8 @@ docs(readme): update installation instructions
 - Avoid introducing unnecessary dependencies.
 - Keep pull requests focused — one feature or fix per PR.
 - Update documentation alongside code changes.
+- Write meaningful error messages and log entries that aid debugging without exposing sensitive data.
+- Prefer explicit over implicit behavior to improve readability and maintainability.
 
 ---
 
@@ -108,3 +150,4 @@ docs(readme): update installation instructions
 - Use the provided issue templates (Bug Report / Feature Request).
 - Provide as much context as possible, including steps to reproduce.
 - Label issues appropriately (`bug`, `enhancement`, `question`, etc.).
+- For security vulnerabilities, follow the [Security Policy](SECURITY.md) instead of opening a public issue.
