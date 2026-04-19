@@ -32,6 +32,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PLAN_TOPIC: ${{ inputs.topic }}
         run: |
+          if [ ! -f "prompts/new-plan-template.prompt.md" ]; then
+            echo "Error: prompts/new-plan-template.prompt.md not found" >&2
+            exit 1
+          fi
+
+          export TEMPLATE
           TEMPLATE=$(cat prompts/new-plan-template.prompt.md)
 
           PAYLOAD=$(node -e "
@@ -53,9 +59,10 @@ jobs:
               max_tokens: 4096
             };
             console.log(JSON.stringify(body));
-          " | TEMPLATE="$TEMPLATE")
+          ")
 
-          RESPONSE=$(curl -sf \
+          RESPONSE=$(curl -sS \
+            --fail-with-body \
             -X POST \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
@@ -103,7 +110,7 @@ jobs:
 
             ### Next Steps
 
-            1. Review the generated plan in [`${{ steps.generate.outputs.filename }}`](../${{ steps.generate.outputs.filename }})
+            1. Review the generated plan in [`${{ steps.generate.outputs.filename }}`](${{ steps.generate.outputs.filename }})
             2. Adjust phases, constraints, or success criteria as needed
             3. Merge this PR to store the plan in `plans/`
             4. Invoke the plan coordinator:
