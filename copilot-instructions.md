@@ -51,4 +51,4 @@ This repository serves as a collaborative space for developers to contribute to 
 - **Contributing Guide:** [CONTRIBUTING.md](CONTRIBUTING.md)
 - **Security Policy:** [SECURITY.md](SECURITY.md)
 - **Pull Request Template:** [pull_request_template.md](pull_request_template.md)
-- **CI/CD Pipeline:** [.github/workflows/ci.yml](workflows/ci.yml)
+- **CI/CD Pipeline:** [.github/workflows/ci.yml](.github/workflows/ci.yml)
