@@ -22,11 +22,11 @@ on:
       superpowers_agent_path:
         description: "Path to the agent file inside the superpowers repository"
         required: false
-        default: "skills/using-superpowers/SKILL.md"
+        default: "agents/using-superpowers.agent.md"
       model:
         description: "GitHub Models identifier"
         required: false
-        default: "openai/gpt-4.1"
+        default: "claude-opus-4-6"
       commit_plan:
         description: "Commit generated plan to the triggering branch"
         required: false
@@ -49,46 +49,74 @@ jobs:
       (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/plan '))
 
     steps:
+      - name: Check actor permission
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.actor
+            });
+            if (!['admin', 'maintain', 'write'].includes(perm.permission)) {
+              core.setFailed(`${context.actor} does not have sufficient permission to trigger plan generation (requires write, maintain, or admin)`);
+            }
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Resolve request and filename
         id: resolve
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          INPUT_USER_REQUEST: ${{ inputs.user_request || '' }}
+          INPUT_PLAN_NAME: ${{ inputs.plan_name || '' }}
+          INPUT_COMMIT_PLAN: ${{ inputs.commit_plan || 'true' }}
+          INPUT_SUPERPOWERS_REPO: ${{ inputs.superpowers_repo || '' }}
+          INPUT_SUPERPOWERS_REF: ${{ inputs.superpowers_ref || '' }}
+          INPUT_SUPERPOWERS_AGENT_PATH: ${{ inputs.superpowers_agent_path || '' }}
+          INPUT_MODEL: ${{ inputs.model || '' }}
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            REQUEST="${{ github.event.comment.body }}"
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            REQUEST="$COMMENT_BODY"
             REQUEST="${REQUEST#'/plan '}"
             PLAN_NAME=""
             COMMIT_PLAN="false"
-            SUPERPOWERS_REPO="${{ github.repository_owner }}/superpowers"
+            SUPERPOWERS_REPO="${REPOSITORY_OWNER}/superpowers"
             SUPERPOWERS_REF="main"
-            SUPERPOWERS_AGENT_PATH="skills/using-superpowers/SKILL.md"
+            SUPERPOWERS_AGENT_PATH="agents/using-superpowers.agent.md"
             MODEL="openai/gpt-4.1"
           else
-            REQUEST="${{ inputs.user_request }}"
-            PLAN_NAME="${{ inputs.plan_name }}"
-            COMMIT_PLAN="${{ inputs.commit_plan }}"
-            SUPERPOWERS_REPO="${{ inputs.superpowers_repo }}"
-            SUPERPOWERS_REF="${{ inputs.superpowers_ref }}"
-            SUPERPOWERS_AGENT_PATH="${{ inputs.superpowers_agent_path }}"
-            MODEL="${{ inputs.model }}"
+            REQUEST="$INPUT_USER_REQUEST"
+            PLAN_NAME="$INPUT_PLAN_NAME"
+            COMMIT_PLAN="$INPUT_COMMIT_PLAN"
+            SUPERPOWERS_REPO="$INPUT_SUPERPOWERS_REPO"
+            SUPERPOWERS_REF="$INPUT_SUPERPOWERS_REF"
+            SUPERPOWERS_AGENT_PATH="$INPUT_SUPERPOWERS_AGENT_PATH"
+            MODEL="$INPUT_MODEL"
           fi
 
-          if [ -z "$PLAN_NAME" ]; then
-            PLAN_NAME="$(echo "$REQUEST" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-64)"
+          if [ -n "$PLAN_NAME" ]; then
+            PLAN_NAME="$(echo "$PLAN_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/\.(prompt|promp)\.md$//' | sed -E 's/\.md$//' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-56)"
+          else
+            PLAN_NAME="$(echo "$REQUEST" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-56)"
           fi
 
           if [ -z "$PLAN_NAME" ]; then
             PLAN_NAME="generated-plan"
           fi
 
+          DELIM="REQUEST_$(date +%s)_$RANDOM"
           {
-            echo "request<<EOF"
+            echo "request<<$DELIM"
             echo "$REQUEST"
-            echo "EOF"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
           echo "plan_name=$PLAN_NAME" >> "$GITHUB_OUTPUT"
           echo "commit_plan=$COMMIT_PLAN" >> "$GITHUB_OUTPUT"
@@ -103,7 +131,18 @@ jobs:
           repository: ${{ steps.resolve.outputs.superpowers_repo }}
           ref: ${{ steps.resolve.outputs.superpowers_ref }}
           path: superpowers
-        continue-on-error: true
+
+      - name: Import superpowers agents
+        id: import_agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d "superpowers/agents" ]; then
+            cp superpowers/agents/*.agent.md .github/agents/ 2>/dev/null || true
+            echo "Imported agents from superpowers/agents/ to .github/agents/"
+          fi
+          AGENT_NAME="$(basename "${{ steps.resolve.outputs.superpowers_agent_path }}" .agent.md)"
+          echo "agent_name=$AGENT_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Build generation prompt
         id: prompt
@@ -114,9 +153,11 @@ jobs:
           AGENT_FILE="superpowers/${{ steps.resolve.outputs.superpowers_agent_path }}"
           TEMPLATE_FILE=".github/prompts/new-plan-template.prompt.md"
 
+          HAS_AGENT="true"
           if [ ! -f "$AGENT_FILE" ]; then
-            echo "Required superpowers agent file not found: $AGENT_FILE"
-            exit 1
+            HAS_AGENT="false"
+            echo "Warning: superpowers agent file not found: $AGENT_FILE"
+            echo "Continuing with template-only prompt."
           fi
 
           {
@@ -133,7 +174,11 @@ jobs:
             echo "- Build check: npm run compile"
             echo ""
             echo "AGENT INSTRUCTIONS:"
-            cat "$AGENT_FILE"
+            if [ "$HAS_AGENT" = "true" ]; then
+              cat "$AGENT_FILE"
+            else
+              echo "(Unavailable: using template-only planning mode.)"
+            fi
             echo ""
             echo "PLAN TEMPLATE REFERENCE:"
             cat "$TEMPLATE_FILE"
@@ -143,71 +188,47 @@ jobs:
             echo "- Include objective, phased tasks, constraints, dependencies, and measurable success criteria."
             echo "- Keep phase goals concrete for implementation in this repository."
             echo "- Include a final validation phase with compile and packaging checks."
-          } > generation-prompt.txt
+          } > "$RUNNER_TEMP/generation-prompt.txt"
 
           echo "agent_file=$AGENT_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Generate plan via GitHub Models
+      - name: Set up Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot@1
+
+      - name: Generate plan via Copilot CLI
         id: generate
         shell: bash
         env:
-          GH_MODELS_API_KEY: ${{ secrets['GH_MODELS_API_KEY'] }}
+          # COPILOT_GITHUB_TOKEN must be a fine-grained PAT with the "Copilot Requests" permission,
+          # stored as the GH_COPILOT_TOKEN repository secret.
+          # See: https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/automate-with-actions
+          COPILOT_GITHUB_TOKEN: ${{ secrets.GH_COPILOT_TOKEN }}
         run: |
           set -euo pipefail
 
           mkdir -p .github/plans
-          PLAN_FILE=".github/plans/${{ steps.resolve.outputs.plan_name }}.md"
+          PLAN_FILE=".github/plans/${{ steps.resolve.outputs.plan_name }}.prompt.md"
+          FULL_PROMPT_FILE="$RUNNER_TEMP/full-generation-prompt.txt"
 
-          if [ -n "${GH_MODELS_API_KEY:-}" ]; then
-            jq -Rs --arg model "${{ steps.resolve.outputs.model }}" '{
-              model: $model,
-              messages: [
-                {role: "system", content: "You are an expert software planning assistant."},
-                {role: "user", content: .}
-              ],
-              temperature: 0.2
-            }' generation-prompt.txt > model-request.json
+          cat "$RUNNER_TEMP/generation-prompt.txt" > "$FULL_PROMPT_FILE"
+          echo "" >> "$FULL_PROMPT_FILE"
+          echo "Write the generated implementation plan as a markdown file to: $PLAN_FILE" >> "$FULL_PROMPT_FILE"
 
-            curl -sS -f \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer ${GH_MODELS_API_KEY}" \
-              https://models.inference.ai.azure.com/chat/completions \
-              -d @model-request.json > model-response.json
-
-            jq -r '.choices[0].message.content // empty' model-response.json > "$PLAN_FILE"
-          else
-            {
-              echo "# Implementation Plan: ${{ steps.resolve.outputs.plan_name }}"
-              echo ""
-              echo "**Objective:**"
-              echo "- ${{ steps.resolve.outputs.request }}"
-              echo ""
-              echo "## Phase 1: Scope and Design"
-              echo "- Clarify acceptance criteria and identify impacted files."
-              echo "- Confirm extension constraints and API-safe implementation details."
-              echo ""
-              echo "## Phase 2: Implementation"
-              echo "- Implement changes in minimal, testable increments."
-              echo "- Keep behavior aligned with current extension architecture."
-              echo ""
-              echo "## Phase 3: Validation"
-              echo "- Run npm run compile."
-              echo "- Package with vsce package when applicable."
-              echo ""
-              echo "## Constraints"
-              echo "- Follow stable VS Code APIs only."
-              echo "- Keep extension lightweight."
-              echo "- Do not modify unrelated files."
-              echo ""
-              echo "## Success Criteria"
-              echo "1. Plan is actionable and phase-based."
-              echo "2. Build validation commands are included."
-              echo "3. Risks and constraints are explicit."
-            } > "$PLAN_FILE"
+          if ! copilot -p "$(cat "$FULL_PROMPT_FILE")" \
+            --agent="${{ steps.import_agents.outputs.agent_name }}" \
+            --allow-all \
+            --no-ask-user; then
+            echo "Copilot CLI failed to generate plan"
+            exit 1
           fi
 
           if [ ! -s "$PLAN_FILE" ]; then
-            echo "Generated plan is empty"
+            echo "Generated plan is empty; Copilot CLI did not write the expected file"
             exit 1
           fi
 

@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       plan_file:
-        description: "Plan filename in .github/plans (for example: my-plan.md)"
+        description: "Plan filename in .github/plans (for example: my-plan.prompt.md)"
         required: true
       superpowers_repo:
         description: "Forked superpowers repository in owner/repo format"
@@ -18,24 +18,24 @@ on:
       superpowers_agent_path:
         description: "Path to the agent file inside the superpowers repository"
         required: false
-        default: "skills/using-superpowers/SKILL.md"
+        default: "agents/using-superpowers.agent.md"
       model:
         description: "GitHub Models identifier"
         required: false
-        default: "openai/gpt-4.1"
+        default: "claude-opus-4-6"
       apply_changes:
         description: "Apply generated patch to repository"
-        required: false
+        required: true
         type: boolean
-        default: false
+        default: true
       commit_changes:
         description: "Commit and push applied changes"
-        required: false
+        required: true
         type: boolean
-        default: false
+        default: true
       create_pr:
         description: "Create a pull request after committing changes"
-        required: false
+        required: true
         type: boolean
         default: true
 
@@ -56,37 +56,114 @@ jobs:
       (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/implement-plan '))
 
     steps:
+      - name: Check actor permission
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.actor
+            });
+            if (!['admin', 'maintain', 'write'].includes(perm.permission)) {
+              core.setFailed(`${context.actor} does not have sufficient permission to trigger plan implementation (requires write, maintain, or admin)`);
+            }
+
+      - name: Validate Token
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || '' }}
+        run: |
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo "Error: GITHUB_TOKEN must be set in secrets."
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Resolve execution inputs
         id: resolve
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          INPUT_PLAN_FILE: ${{ inputs.plan_file || '' }}
+          INPUT_APPLY_CHANGES: ${{ inputs.apply_changes || 'true' }}
+          INPUT_COMMIT_CHANGES: ${{ inputs.commit_changes || 'true' }}
+          INPUT_CREATE_PR: ${{ inputs.create_pr || 'true' }}
+          INPUT_SUPERPOWERS_REPO: ${{ inputs.superpowers_repo || '' }}
+          INPUT_SUPERPOWERS_REF: ${{ inputs.superpowers_ref || '' }}
+          INPUT_SUPERPOWERS_AGENT_PATH: ${{ inputs.superpowers_agent_path || '' }}
+          INPUT_MODEL: ${{ inputs.model || '' }}
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            BODY="${{ github.event.comment.body }}"
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            BODY="$COMMENT_BODY"
             PLAN_FILE="${BODY#'/implement-plan '}"
             APPLY_CHANGES="false"
             COMMIT_CHANGES="false"
             CREATE_PR="false"
-            SUPERPOWERS_REPO="${{ github.repository_owner }}/superpowers"
+            SUPERPOWERS_REPO="${REPOSITORY_OWNER}/superpowers"
             SUPERPOWERS_REF="main"
-            SUPERPOWERS_AGENT_PATH="skills/using-superpowers/SKILL.md"
+            SUPERPOWERS_AGENT_PATH="agents/using-superpowers.agent.md"
             MODEL="openai/gpt-4.1"
           else
-            PLAN_FILE="${{ inputs.plan_file }}"
-            APPLY_CHANGES="${{ inputs.apply_changes }}"
-            COMMIT_CHANGES="${{ inputs.commit_changes }}"
-            CREATE_PR="${{ inputs.create_pr }}"
-            SUPERPOWERS_REPO="${{ inputs.superpowers_repo }}"
-            SUPERPOWERS_REF="${{ inputs.superpowers_ref }}"
-            SUPERPOWERS_AGENT_PATH="${{ inputs.superpowers_agent_path }}"
-            MODEL="${{ inputs.model }}"
+            PLAN_FILE="$INPUT_PLAN_FILE"
+            APPLY_CHANGES="$INPUT_APPLY_CHANGES"
+            COMMIT_CHANGES="$INPUT_COMMIT_CHANGES"
+            CREATE_PR="$INPUT_CREATE_PR"
+            SUPERPOWERS_REPO="$INPUT_SUPERPOWERS_REPO"
+            SUPERPOWERS_REF="$INPUT_SUPERPOWERS_REF"
+            SUPERPOWERS_AGENT_PATH="$INPUT_SUPERPOWERS_AGENT_PATH"
+            MODEL="$INPUT_MODEL"
           fi
 
-          PLAN_SLUG="$(echo "$PLAN_FILE" | sed -E 's/\.md$//' | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-40)"
+          RAW_PLAN_INPUT="$PLAN_FILE"
+          PLAN_FILE="$(echo "$RAW_PLAN_INPUT" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+          PLAN_FILE="${PLAN_FILE#./}"
+          PLAN_FILE="${PLAN_FILE#'.github/plans/'}"
+
+          if ! [[ "$PLAN_FILE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid plan file input: $RAW_PLAN_INPUT"
+            echo "Use a filename like feature-plan, feature-plan.prompt.md, or feature-plan.md"
+            exit 1
+          fi
+
+          PLAN_STEM="$(echo "$PLAN_FILE" | sed -E 's/\.(prompt|promp)\.md$//' | sed -E 's/\.md$//')"
+          if [ -z "$PLAN_STEM" ]; then
+            echo "Invalid plan file input: $RAW_PLAN_INPUT"
+            exit 1
+          fi
+
+          CANDIDATES=("$PLAN_FILE" "${PLAN_STEM}.prompt.md" "${PLAN_STEM}.md" "${PLAN_STEM}.promp.md")
+          RESOLVED_PLAN_FILE=""
+          ATTEMPTED=""
+          for candidate in "${CANDIDATES[@]}"; do
+            if [[ " $ATTEMPTED " == *" $candidate "* ]]; then
+              continue
+            fi
+
+            ATTEMPTED="$ATTEMPTED $candidate"
+            if [ -f ".github/plans/$candidate" ]; then
+              RESOLVED_PLAN_FILE="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$RESOLVED_PLAN_FILE" ]; then
+            echo "Plan file not found in .github/plans."
+            echo "Input: $RAW_PLAN_INPUT"
+            echo "Tried: $(echo "$ATTEMPTED" | sed -E 's/^[[:space:]]+//')"
+            exit 1
+          fi
+
+          PLAN_FILE="$RESOLVED_PLAN_FILE"
+
+          PLAN_SLUG="$(echo "$PLAN_FILE" | sed -E 's/\.prompt\.md$//' | sed -E 's/\.md$//' | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-40)"
           if [ -z "$PLAN_SLUG" ]; then
             PLAN_SLUG="plan"
           fi
@@ -94,16 +171,7 @@ jobs:
           PR_BRANCH="plan-implementation/${PLAN_SLUG}-${{ github.run_number }}"
           BASE_BRANCH="${GITHUB_REF_NAME:-main}"
 
-          if ! [[ "$PLAN_FILE" =~ ^[A-Za-z0-9._-]+\.md$ ]]; then
-            echo "Invalid plan file. Use a filename like feature-plan.md"
-            exit 1
-          fi
-
           PLAN_PATH=".github/plans/$PLAN_FILE"
-          if [ ! -f "$PLAN_PATH" ]; then
-            echo "Plan file not found: $PLAN_PATH"
-            exit 1
-          fi
 
           echo "plan_file=$PLAN_FILE" >> "$GITHUB_OUTPUT"
           echo "plan_path=$PLAN_PATH" >> "$GITHUB_OUTPUT"
@@ -123,7 +191,6 @@ jobs:
           repository: ${{ steps.resolve.outputs.superpowers_repo }}
           ref: ${{ steps.resolve.outputs.superpowers_ref }}
           path: superpowers
-        continue-on-error: true
 
       - name: Build implementation prompt package
         id: prompt
@@ -134,9 +201,11 @@ jobs:
           mkdir -p implementation-output
 
           AGENT_FILE="superpowers/${{ steps.resolve.outputs.superpowers_agent_path }}"
+          HAS_AGENT="true"
           if [ ! -f "$AGENT_FILE" ]; then
-            echo "Required superpowers agent file not found: $AGENT_FILE"
-            exit 1
+            HAS_AGENT="false"
+            echo "Warning: superpowers agent file not found: $AGENT_FILE"
+            echo "Continuing without superpowers agent instructions."
           fi
 
           {
@@ -149,7 +218,11 @@ jobs:
             echo "- Validation commands: npm run compile"
             echo ""
             echo "AGENT INSTRUCTIONS:"
-            cat "$AGENT_FILE"
+            if [ "$HAS_AGENT" = "true" ]; then
+              cat "$AGENT_FILE"
+            else
+              echo "(Unavailable: using template-only implementation mode.)"
+            fi
             echo ""
             echo "SELECTED PLAN:"
             cat "${{ steps.resolve.outputs.plan_path }}"
@@ -162,48 +235,48 @@ jobs:
 
           echo "agent_file=$AGENT_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Generate implementation patch via GitHub Models
+      - name: Set up Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot@1
+
+      - name: Generate implementation patch via Copilot CLI
         id: generate
         shell: bash
         env:
-          GH_MODELS_API_KEY: ${{ secrets['GH_MODELS_API_KEY'] || '' }}
+          # COPILOT_GITHUB_TOKEN must be a fine-grained PAT with the "Copilot Requests" permission,
+          # stored as the GH_COPILOT_TOKEN repository secret.
+          # See: https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/automate-with-actions
+          COPILOT_GITHUB_TOKEN: ${{ secrets.GH_COPILOT_TOKEN }}
         run: |
           set -euo pipefail
 
           PATCH_FILE="implementation-output/generated.patch"
-          RAW_FILE="implementation-output/model-response.txt"
+          FULL_PROMPT_FILE="implementation-output/full-implementation-prompt.txt"
 
-          if [ -n "${GH_MODELS_API_KEY:-}" ]; then
-            jq -Rs --arg model "${{ steps.resolve.outputs.model }}" '{
-              model: $model,
-              messages: [
-                {role: "system", content: "You are an expert software implementation assistant."},
-                {role: "user", content: .}
-              ],
-              temperature: 0.1
-            }' implementation-output/implementation-prompt.txt > implementation-output/model-request.json
+          cat implementation-output/implementation-prompt.txt > "$FULL_PROMPT_FILE"
+          echo "" >> "$FULL_PROMPT_FILE"
+          echo "Write only a unified diff patch to the file: $PATCH_FILE" >> "$FULL_PROMPT_FILE"
+          echo "The patch must start with 'diff --git'. Do not wrap output in code fences." >> "$FULL_PROMPT_FILE"
 
-            curl -sS -f \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer ${GH_MODELS_API_KEY}" \
-              https://models.inference.ai.azure.com/chat/completions \
-              -d @implementation-output/model-request.json > implementation-output/model-response.json
-
-            jq -r '.choices[0].message.content // empty' implementation-output/model-response.json > "$RAW_FILE"
-          else
-            {
-              echo "GH_MODELS_API_KEY is not configured."
-              echo "No model patch was generated."
-            } > "$RAW_FILE"
+          if ! copilot -p "/fleet $(cat "$FULL_PROMPT_FILE")" \
+            --agent="plan-coordinator" \
+            --allow-all \
+            --remote \
+            --no-ask-user; then
+            echo "Copilot CLI failed to generate implementation patch"
+            exit 1
           fi
-
-          awk 'BEGIN{copy=0} /^diff --git /{copy=1} copy{print}' "$RAW_FILE" > "$PATCH_FILE" || true
 
           if [ ! -s "$PATCH_FILE" ]; then
-            echo "patch_ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "patch_ready=true" >> "$GITHUB_OUTPUT"
+            echo "Generated patch is empty; Copilot CLI did not write the expected file"
+            exit 1
           fi
+
+          echo "patch_ready=true" >> "$GITHUB_OUTPUT"
 
           echo "patch_file=$PATCH_FILE" >> "$GITHUB_OUTPUT"
 

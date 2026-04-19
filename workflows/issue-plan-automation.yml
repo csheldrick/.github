@@ -1,9 +1,16 @@
 name: Issue Plan Automation
-run-name: Issue automation #${{ github.event.issue.number }}
+run-name: |
+  ${{
+    github.event_name == 'issue_comment'
+    && format('Replan issue #{0}', github.event.issue.number)
+    || format('Issue automation #{0}', github.event.issue.number)
+  }}
 
 on:
   issues:
     types: [opened]
+  issue_comment:
+    types: [created]
 
 permissions:
   actions: write
@@ -18,25 +25,45 @@ concurrency:
 env:
   SUPERPOWERS_REPO: csheldrick/superpowers
   SUPERPOWERS_REF: main
-  SUPERPOWERS_AGENT_PATH: skills/using-superpowers/SKILL.md
-  MODEL: openai/gpt-4.1
+  SUPERPOWERS_AGENT_PATH: agents/using-superpowers.agent.md
+  MODEL: claude-sonnet-4.6
 
 jobs:
   automate:
     name: Generate And Implement Plan
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    if: |
+      github.event_name == 'issues' ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/replan'))
 
     steps:
+      - name: Check actor permission
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.actor
+            });
+            if (!['admin', 'maintain', 'write'].includes(perm.permission)) {
+              core.setFailed(`${context.actor} does not have sufficient permission to trigger plan automation (requires write, maintain, or admin)`);
+            }
+
       - name: Resolve issue context
         id: resolve
         shell: bash
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body || '' }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
 
-          ISSUE_NUMBER="${{ github.event.issue.number }}"
-          ISSUE_TITLE="${{ github.event.issue.title }}"
-          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
           TITLE_SLUG="$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-40)"
 
           if [ -z "$TITLE_SLUG" ]; then
@@ -44,16 +71,18 @@ jobs:
           fi
 
           PLAN_NAME="issue-${ISSUE_NUMBER}-${TITLE_SLUG}"
-          PLAN_FILE="${PLAN_NAME}.md"
+          PLAN_FILE="${PLAN_NAME}.prompt.md"
+
+          DELIM="ISSUE_REQUEST_$(date +%s)_$RANDOM"
 
           {
-            echo "issue_request<<EOF"
-            echo "Issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}"
+            echo "issue_request<<$DELIM"
+            echo "Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
             echo ""
-            echo "${{ github.event.issue.body }}"
+            echo "$ISSUE_BODY"
             echo ""
-            echo "Issue URL: ${{ github.event.issue.html_url }}"
-            echo "EOF"
+            echo "Issue URL: ${ISSUE_URL}"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
           echo "plan_name=$PLAN_NAME" >> "$GITHUB_OUTPUT"
           echo "plan_file=$PLAN_FILE" >> "$GITHUB_OUTPUT"
@@ -63,8 +92,9 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const isReplan = context.eventName === 'issue_comment';
             const body = [
-              'Issue automation started.',
+              isReplan ? 'Replan automation started.' : 'Issue automation started.',
               '',
               `- Planned file: .github/plans/${{ steps.resolve.outputs.plan_file }}`,
               `- Generation workflow: plan-generation.yml`,
@@ -79,6 +109,7 @@ jobs:
             });
 
       - name: Dispatch plan generation workflow
+        id: dispatch_generation
         uses: actions/github-script@v7
         env:
           ISSUE_REQUEST: ${{ steps.resolve.outputs.issue_request }}
@@ -88,6 +119,9 @@ jobs:
           MODEL: ${{ env.MODEL }}
         with:
           script: |
+            const dispatchTime = new Date().toISOString();
+            const expectedTitle = `Generate plan ${{ steps.resolve.outputs.plan_name }}`;
+
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -104,14 +138,18 @@ jobs:
               }
             });
 
+            core.setOutput('dispatch_time', dispatchTime);
+            core.setOutput('expected_title', expectedTitle);
+
       - name: Wait for plan generation workflow
         id: generation
         uses: actions/github-script@v7
         with:
           script: |
-            const expectedTitle = `Generate plan ${{ steps.resolve.outputs.plan_name }}`;
             const workflowId = 'plan-generation.yml';
             const branch = '${{ steps.resolve.outputs.default_branch }}';
+            const dispatchTime = new Date('${{ steps.dispatch_generation.outputs.dispatch_time }}').getTime();
+            const expectedTitle = '${{ steps.dispatch_generation.outputs.expected_title }}';
 
             let matchedRun;
             for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -124,7 +162,13 @@ jobs:
                 per_page: 20
               });
 
-              matchedRun = response.data.workflow_runs.find((run) => run.display_title === expectedTitle);
+              const matchingRuns = response.data.workflow_runs
+                .filter((run) => new Date(run.created_at).getTime() >= dispatchTime)
+                .filter((run) => run.display_title === expectedTitle)
+                .filter((run) => run.head_branch === branch)
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+              matchedRun = matchingRuns[0];
               if (matchedRun && matchedRun.status === 'completed') {
                 core.setOutput('generation_run_url', matchedRun.html_url);
                 core.setOutput('generation_conclusion', matchedRun.conclusion || 'unknown');
@@ -137,7 +181,7 @@ jobs:
               await new Promise((resolve) => setTimeout(resolve, 10000));
             }
 
-            core.setFailed(`Timed out waiting for ${expectedTitle}`);
+            core.setFailed('Timed out waiting for generated plan workflow run.');
       - name: Verify committed plan exists
         uses: actions/github-script@v7
         with:
@@ -150,9 +194,13 @@ jobs:
             });
 
       - name: Dispatch plan implementation workflow
+        id: dispatch_implementation
         uses: actions/github-script@v7
         with:
           script: |
+            const dispatchTime = new Date().toISOString();
+            const expectedTitle = `Implement plan ${{ steps.resolve.outputs.plan_file }}`;
+
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -169,6 +217,9 @@ jobs:
                 create_pr: 'true'
               }
             });
+
+            core.setOutput('dispatch_time', dispatchTime);
+            core.setOutput('expected_title', expectedTitle);
         env:
           SUPERPOWERS_REPO: ${{ env.SUPERPOWERS_REPO }}
           SUPERPOWERS_REF: ${{ env.SUPERPOWERS_REF }}
@@ -180,9 +231,10 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const expectedTitle = `Implement plan ${{ steps.resolve.outputs.plan_file }}`;
             const workflowId = 'plan-implementation.yml';
             const branch = '${{ steps.resolve.outputs.default_branch }}';
+            const dispatchTime = new Date('${{ steps.dispatch_implementation.outputs.dispatch_time }}').getTime();
+            const expectedTitle = '${{ steps.dispatch_implementation.outputs.expected_title }}';
 
             let matchedRun;
             for (let attempt = 0; attempt < 240; attempt += 1) {
@@ -195,7 +247,13 @@ jobs:
                 per_page: 20
               });
 
-              matchedRun = response.data.workflow_runs.find((run) => run.display_title === expectedTitle);
+              const matchingRuns = response.data.workflow_runs
+                .filter((run) => new Date(run.created_at).getTime() >= dispatchTime)
+                .filter((run) => run.display_title === expectedTitle)
+                .filter((run) => run.head_branch === branch)
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+              matchedRun = matchingRuns[0];
               if (matchedRun && matchedRun.status === 'completed') {
                 core.setOutput('implementation_run_url', matchedRun.html_url);
                 core.setOutput('implementation_conclusion', matchedRun.conclusion || 'unknown');
@@ -208,7 +266,7 @@ jobs:
               await new Promise((resolve) => setTimeout(resolve, 15000));
             }
 
-            core.setFailed(`Timed out waiting for ${expectedTitle}`);
+            core.setFailed('Timed out waiting for plan implementation workflow run.');
 
       - name: Find created pull request
         id: pull_request
@@ -240,8 +298,10 @@ jobs:
           PULL_REQUEST_URL: ${{ steps.pull_request.outputs.pr_url }}
         with:
           script: |
+            const isReplan = context.eventName === 'issue_comment';
+            const label = isReplan ? 'Replan automation' : 'Issue automation';
             const lines = [
-              `Issue automation ${process.env.JOB_STATUS}.`,
+              `${label} ${process.env.JOB_STATUS}.`,
               '',
               `- Plan file: .github/plans/${process.env.PLAN_FILE}`,
               `- Generation workflow run: ${process.env.GENERATION_RUN_URL || 'not available'}`,
